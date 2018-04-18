@@ -1,0 +1,609 @@
+#!/bin/bash
+
+_bin_path="$(dirname $(realpath "$0"))"
+
+source "${_bin_path}/.env"
+
+set -euo pipefail
+
+_user_agent="User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.181 Safari/537.36"
+_accept_lang="Accept-Language: en-US,en;q=0.9,sv;q=0.8,zh-TW;q=0.7,zh;q=0.6,fi;q=0.5,it;q=0.4,de;q=0.3"
+
+die () {
+	echo >&2 "$@"
+	exit 1
+}
+
+which curl > /dev/null || die 'error: you need curl'
+which jq > /dev/null || die 'error: you need jq'
+
+_sed_bin=$(which gsed || which sed)
+_tac_bin=$(which gtac || which tac)
+[ "${_tac_bin}" != "" ] || die 'error: you need tac'
+[ "${_sed_bin}" != "" ] || die 'error: you need sed'
+
+h1_init () {
+	[ "${_h1_username}" != "" ] || die 'error: HACKERONE_USERNAME env-variable required'
+	[ "${_h1_password}" != "" ] || die 'error: HACKERONE_PASSWORD env-variable required'
+	_program=""
+	_report_file=""
+	_preview=""
+	_draft=""
+	_force=""
+	report_args $@
+}
+
+_h1_username="${HACKERONE_USERNAME:-}"
+_h1_password="${HACKERONE_PASSWORD:-}"
+_h1_session_file="${_bin_path}/.h1-session"
+
+_version="1.0"
+_command="${1-help}"
+
+report_args () {
+	while [ $# -gt 1 ]; do
+		case "$2" in
+		--preview|-p)
+			_preview="1"
+		;;
+		--draft|-d)
+			_draft="1"
+		;;
+		--force|-f)
+			_force="1"
+		;;
+		*)
+			# two routes, either we have file only and preview
+			# or we have program and file (both with or without preview)
+			if [ "${3:-}" == "" ] && [ "${_program}" == "" ] && [ "${_preview}" == "1" ]; then
+				# only one arg excluding flags, allow if draft
+				_program=":preview-only:"
+			fi
+
+			if [ "${_program}" == "" ]; then
+				_program="${2:-}"
+			else
+				_report_file="${2:-}"
+			fi
+
+		;;
+		esac
+		shift
+	done
+	[ "${_program}" != "" ] || doc_error "program not found"
+	[ "${_report_file}" != "" ] || doc_error "report file not found"
+}
+
+trim () {
+	echo "${1}" | ${_tac_bin} | ${_sed_bin} -e '/./,$!d' | ${_tac_bin} | ${_sed_bin} -e '/./,$!d'
+}
+
+frontmatter_parse () {
+	echo "${1}" | ${_sed_bin} -n "/^${2}:/Ip" | cut -d ":" -f 2- | awk '{$1=$1};1' | ${_sed_bin} -e $'s/^[\'"]//' -e $'s/[\'"]$//'
+}
+
+report_tag_attachments() {
+	_file_dir=$(dirname "${_report_file}")
+
+	for i in $(echo "${_attachments}" | jq -r '.[]')
+	do
+		[ ! -f "${_file_dir}/${i}" ] && doc_error "inline attachment not found: ${_file_dir}/${i}"
+	done
+
+	_found=1
+	_key=1
+	while [ "${_found}" != "" ]; do
+		_found=$(echo "${_report}" | grep -m1 -Eo "<img upload[^>]*>|<video upload[^>]*>" | head -n 1 || echo "")
+		[ "${_found}" == "" ] && break;
+		_found_src=$(echo "${_found}" | ${_sed_bin} -r -n $'/src/s/.*src=["\']?([^"\'>]+).*/\\1/p')
+		[ ! -f "${_file_dir}/${_found_src}" ] && doc_error "inline attachment not found: ${_file_dir}/${_found_src}"
+		_files+=("${_found_src}")
+		_file_keys+=("${_key}")
+		_report=$(echo "${_report}" | ${_sed_bin} -r -e "0,/<(img|video) upload[^>]*>/ s//{UPLOAD${_key}}/"); 
+		_key=$(($_key + 1))
+	done
+}
+
+h1_parse () {
+	doc_action "parsing ${_report_file}..."
+
+	[ ! -f "${1}" ] && doc_error "report file not found: ${1}"
+	
+	#setup file arrays if needed
+	_files=()
+	_file_keys=()
+
+	# extract frontmatter from file
+	_frontmatter=$(${_sed_bin} -n -e '1 { /^---/ { :a N; /\n---/! ba; p} }' "${1}")
+
+	# check if already reported
+	_report_ref=$(frontmatter_parse "${_frontmatter}" "report")
+
+	[ "${_report_ref}" != "" ] && [ "${_force}" == "" ] \
+		&& [ "${_preview}" == "" ] \
+		&& [ "${_draft}" == "" ] \
+		&& doc_action "already reported: ${_report_ref}, ignoring" && exit 0
+
+	# extract all but frontmatter from file
+	_report=$(${_sed_bin} '1 { /^---/ { :a N; /\n---/! ba; d} }' "${1}")
+	#fetch first #-header in the markdown as title
+
+	_title=$(echo "${_report}" | grep -m1 -E '^#[ ]' | head -n 1 || echo "" | ${_sed_bin} -e 's/^#[ ]//')
+
+	[ ${#_title} -le 150 ] || doc_error "report title needs to be maximum 150 characters"
+
+	# remove first #-header from description
+	_report=$(trim "$(echo "${_report}" | ${_sed_bin} '0,/#[ ]/{//d;}')")
+
+	# parse a bunch of tags in the frontmatter
+	_asset=$(frontmatter_parse "${_frontmatter}" "asset")
+	_attachments=$(frontmatter_parse "${_frontmatter}" "attachments")
+	#validate attachments
+	if [ "${_attachments}" != "" ]; then
+		_attachments=$(echo "${_attachments}" | jq -c '.')
+		if [ "${_attachments}" == "" ]; then
+			doc_error "invalid attachments"
+		fi
+	fi
+
+	_weakness=$(frontmatter_parse "${_frontmatter}" "weakness")
+	_severity=$(frontmatter_parse "${_frontmatter}" "severity")
+	_context_url=$(frontmatter_parse "${_frontmatter}" "url")
+	_context_inj_type=$(frontmatter_parse "${_frontmatter}" "injection-type")
+
+	# at this point, the whole report is in $_report
+	# we will now divide it into desc and impact
+	report_tag_attachments
+
+	#divide report into desc and impact
+	_description=$(echo "${_report}" | ${_sed_bin} -n -e '/^#* impact/Iq;p')
+
+	#divide report into desc and impact
+	_impact=$(trim "$(echo "${_report}" | ${_sed_bin} -n -e '/^#* impact/I,${//d;p}')")
+
+	# empty report so we dont accidentially use it
+	_report=""
+
+	#allow empty impact
+	if [ "${_impact}" == "" ]; then _impact="#"; fi
+
+	[ "${_title}" != "" ] || doc_error "title not found"
+	[ "${_description}" != "" ] || doc_error "description not found"
+
+}
+
+mark_report_done() {
+	_report_data="${1}"
+	if [ "${_report_ref}" != "" ] && [ "${_force}" != "" ]; then
+		# old report in there, remove first
+		doc_action "remove old report reference"
+		${_sed_bin} -i '0,/report: /{//d;}' "${_report_file}"
+	fi
+	doc_action "marking report as done"
+	${_sed_bin} -i "0,/---/a report: ${_report_data}" "${_report_file}"
+}
+
+h1_preview () {
+	echo "--- description:"
+	doc_report "${_description}"
+	echo "--- impact:"
+	doc_report "${_impact}"
+	echo "--- attributes:"
+	doc_attr "title:" "${_title}"
+	[ "${_report_ref}" != "" ] && doc_attr "report:" "${_report_ref}"
+	doc_attr "program:" "${_program}"
+	doc_attr "weakness:" "${_weakness}"
+	[ "${_attachments}" != "" ] && doc_attr "attachments:" "$(echo "${_attachments}" | jq -r '.[]' | tr '\n\r' ',' | ${_sed_bin} -r 's/(^,|,$)//')"
+	[ "${#_files[@]}" -gt 0 ] && doc_attr "inline-attachments:" $(IFS=, ; echo "${_files[*]}")
+	[ "${_severity}" != "" ] && doc_attr "severity:" "${_severity}"
+	[ "${_asset}" != "" ] && doc_attr "asset:" "${_asset}"
+	[ "${_context_url}" != "" ] && doc_attr "url:" "${_context_url}"
+	[ "${_context_inj_type}" != "" ] && doc_attr "injection-type:" "${_context_inj_type}"
+	echo "---"
+}
+
+curl_parse() {
+	_response_headers=$(echo "$1" | ${_sed_bin} "/^\s*$(printf '\r')*$/q")
+	_response_code=$(echo "${_response_headers}" | head -n 1 | cut -d " " -f2)
+	_response_body=$(echo "$1" | ${_sed_bin} "1,/^\s*$(printf '\r')*$/d")
+}
+
+list_selector() {
+	_list_id=""
+	_name="$1"
+	_fulldata="$2"
+	_check="$3"
+	_select_pattern="$4"
+	_list_pattern="$5"
+	_id_pattern="$6"
+	_direct_match_pattern="$7"
+	_context_pattern="${8:-}"
+
+	_data="$(echo "${_fulldata}" | jq --arg w "${_check}" "${_select_pattern}")"
+
+	_count=$(echo "${_data}" | jq 'length')
+	_fullcount=$(echo "${_fulldata}" | jq --arg w "" "${_select_pattern}" | jq 'length')
+
+	if [ "${_fullcount}" == "0" ]; then
+		doc_action "no ${_name} exists, ignoring"
+		return
+	fi
+
+	if [ "${_count}" != "1" ]; then
+		if [ "${_count}" -lt 1 ]; then
+			doc_action "${_name} not found"
+			_data="$(echo "${_fulldata}" | jq --arg w "" "${_select_pattern}")"
+
+			#doc_error "${_name} not found"
+		fi
+		doc_select "multiple found, select ${_name}"
+		doc_select "$(echo "${_data} " | jq -r "${_list_pattern}")"
+		echo -n "enter ${_name} id: "
+		read _list_id
+		_list_id=$(echo "${_list_id}" | ${_sed_bin} 's/[^0-9]*//g')
+		[ "${_list_id}" == "" ] && doc_error "error: no ${_name} selected"
+		_list_id=$(echo "${_data}" | jq -r --arg w_id "${_list_id}" "${_id_pattern}")
+	else
+		_list_id=$(echo "${_data}" | jq -r "${_direct_match_pattern}")
+	fi
+
+	if [ "${_name}" == "weakness" ]; then
+		_context_data=""
+		_context=$(echo "${_data}" | jq -r --arg w_id "${_list_id}" "${_context_pattern}")
+		if [ "${_context}" != "null" ]; then
+			doc_action "context found (needs additional data) ${_context}"
+			case "${_context}" in
+				XssStoredContext|ClickJackingContext|CsrfContext)
+					[ "${_context_url}" == "" ] && doc_select "context-url needed" && echo -n "enter context url: " && read _context_url
+					_context_url=$(echo "${_context_url}" | sed 's/&/%26/g')
+					_context_data="${_context_data}&report[weakness_context][url]=${_context_url}"
+
+					if [[ $_context =~ ^ClickJackingContext|CsrfContext$ ]]; then
+						_context_data="${_context_data}&report[weakness_context][tricks_user]=true"
+						_context_data="${_context_data}&report[weakness_context][state_change_operation]=See+above"
+					fi
+					if [[ $_context =~ ^XssStoredContext|CsrfContext$ ]]; then
+						_context_data="${_context_data}&report[weakness_context][verified]=true"
+					fi
+
+					doc_action "context-data set for weakness"
+				;;
+				SqlInjectionContext)
+					_context_data="${_context_data}&report[weakness_context][verified]=true"
+					_context_data="${_context_data}&report[weakness_context][verification_attempt_results]=See+above"
+
+					[ "${_context_inj_type}" == "" ] && doc_select "context-injection-type needed" && echo -n "enter context-injection-type: " && read _context_inj_type
+
+					doc_action "matching injection type: '${_context_inj_type}' against list..."
+			
+					_parent_list_id="${_list_id}"
+
+					_context_inj_check=$(echo "${_context_inj_type}" | ${_sed_bin} $'s/ /\.\*/g')
+					_context_inj_list=$(echo -n $'Classic / In-Band\nOut-of-Band\nBlind / Inferential\nUNION Operation\nBoolean\nError based\nTime delay' | \
+					jq --raw-input --slurp 'split("\n")')
+					# type, list, check, select pattern, list pattern, id pattern, direct pattern, context pattern
+					list_selector \
+						"injection type" \
+						"$(echo -n $'Classic / In-Band\nOut-of-Band\nBlind / Inferential\nUNION Operation\nBoolean\nError based\nTime delay' | \
+							jq --raw-input --slurp 'split("\n")')" \
+						"${_context_inj_check}" \
+						'[ .[] | select(. | match($w; "i")) ] | to_entries' \
+						'.[] | "* " + (.key|tostring) + " - " + .value' \
+						'.[] | select(.key == ($w_id|tonumber)) | .value' \
+						'.[] | .value'
+			
+					_context_inj_id="${_list_id}"
+					_context_inj_type=$(echo "${_context_inj_id}" | sed 's/&/%26/g')
+					_context_data="${_context_data}&report[weakness_context][exploitation_technique]=${_context_inj_type}"
+
+					# put back parent list id
+					_list_id="${_parent_list_id}"
+					
+				;;
+				SsrfContext)
+					_context_data="${_context_data}&report[weakness_context][verified]=true"
+					_context_data="${_context_data}&report[weakness_context][bypasses_nac]=true"
+					_context_data="${_context_data}&report[weakness_context][internal_services]=See+above"
+					_context_data="${_context_data}&report[weakness_context][impact]=%23"
+				;;
+				*)
+					doc_error "unknown context: ${_context}, unknown fields needed"
+				;;
+			esac
+		fi
+
+	fi
+
+	if [ "${_list_id}" == "" ]; then
+		doc_action "${_name} not found"
+	else
+		doc_success "${_name} ${_list_id} selected"
+	fi
+}
+
+h1_api() {
+	case "${1}" in
+	current_user)
+		doc_action "fetching current user..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user")"
+
+		[ "${_response_code}" == "302" ] && doc_action "redirect, try again..." && \
+			curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+				-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not fetch current user: ${_response_code} ${_response_body}"
+		# save session
+		_user_info="${_response_body}"
+	;;
+	sign-in)
+		# session call
+		doc_action "fetching session..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+			-X POST --data-urlencode "email=${_h1_username}" \
+			--data-urlencode "password=${_h1_password}" \
+			-H "X-CSRF-Token: ${_csrf_token}" "https://hackerone.com/sessions")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+		doc_action "signing in..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+			-X POST --data-urlencode "authenticity_token=${_csrf_token}" \
+			--data-urlencode "user[email]=${_h1_username}" \
+			--data-urlencode "user[password]=${_h1_password}" \
+			"https://hackerone.com/users/sign_in")"
+
+		[ "${_response_code}" != "302" ] && \
+			doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+		doc_success "signed in successfully!"
+
+	;;
+	validate-program)
+		doc_action "validating program..."
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/${_program}/reports/new")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not find program '${_program}': ${_response_code}"
+
+		:
+	;;
+	report-attributes)
+
+		doc_action "finding report attributes..."
+
+		doc_action "fetching weaknesses..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/${_program}/weaknesses")"
+
+		doc_action "matching weakness: '${_weakness}' against list..."
+
+		_weakness_check=$(echo "${_weakness}" | ${_sed_bin} $'s/ /\.\*/g')
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern, context pattern
+		list_selector \
+			"weakness" \
+			"${_response_body}" \
+			"${_weakness_check}" \
+			'[ .weaknesses[] | select(.name | match($w; "i")) ]' \
+			'[ .[] | "* " + (.id|tostring) + " - " + .name ] | .[]' \
+			'.[] | select(.id == ($w_id|tonumber)) | .id' \
+			'.[] | .id' \
+			'.[] | select(.id == ($w_id|tonumber)) | .context_type'
+
+		_weakness_id="${_list_id}"
+
+		doc_action "fetching graphql-token..."
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user/graphql_token.json")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not fetch graphql-token: ${_response_code} ${_response_body}"
+		
+		_h1_gql_token=$(echo "${_response_body}" | jq -r '.graphql_token')
+
+		doc_action "fetching assets..."
+
+		_assets_gql_query=$(echo '{"query":"$query"}' | jq --arg p "${_program}" '.query = "query Structured_scopes_selector { query { assets:team(handle:\"" + $p + "\") { list:structured_scopes(first:100,archived:false) { edges { node { _id, asset_identifier, eligible_for_submission } } } } } }"')
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-Auth-Token: ${_h1_gql_token}" -H "Content-Type: application/json" --data "${_assets_gql_query}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/graphql")"
+
+		doc_action "matching asset: '${_asset}' against list..."
+
+		_asset_check=$(echo "${_asset}" | ${_sed_bin} $'s/ /\.\*/g')
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern
+		list_selector \
+			"asset" \
+			"${_response_body}" \
+			"${_asset_check}" \
+			'[ .data.query.assets.list.edges[].node | select (.eligible_for_submission == true) | select(.asset_identifier | match($w; "i")) ]' \
+			'[ .[] | "* " + (._id|tostring) + " - " + .asset_identifier ] | .[]' \
+			'.[] | select(._id == $w_id) | ._id' \
+			'.[] | ._id'
+
+		_asset_id="${_list_id}"
+
+		if [ "${_asset_id}" == "" ]; then
+			_asset_id="0"
+		fi
+
+		_optional_data=""
+		if [ "${_severity}" != "" ]; then
+			_severity=$(trim "$(echo "${_severity}" | tr '[:upper:]' '[:lower:]')")
+			_optional_data="report[severity][rating]=${_severity}&report[severity][with_metrics]=false"
+		fi
+
+	;;
+	report-draft)
+
+		doc_action "sending report-draft to get draft id..."
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+		--data-urlencode "report[title]=${_title}" \
+		--data-urlencode "report[vulnerability_information]=${_description}" \
+		--data-urlencode "report[impact]=${_impact}" \
+		--data-urlencode "report[weakness_id]=${_weakness_id}" \
+		--data "${_attachment_post}" \
+		"https://hackerone.com/${_program}/reports/draft_sync")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not save draft: ${_response_code} ${_response_body}"
+
+		_draft_id=$(echo "${_response_body}" | jq -r '.id')
+
+		doc_success "draft id: ${_draft_id} saved"
+
+		if [ "${_draft}" != "" ]; then
+			doc_success "https://hackerone.com/${_program}/reports/new"
+		fi
+
+	;;
+	upload-files)
+
+		# we have two set of files, $_files and a json with attachments. files needs to be
+		# modifying the report
+		_attachment_post=""
+		doc_action "uploading attachments..."
+
+		for i in $(echo "${_attachments}" | jq -r '.[]')
+		do
+			doc_action "uploading file... $i"
+
+			curl_parse "$(curl -X POST -H "Accept: application/json" -H "Expect: " -H "${_user_agent}" -H "${_accept_lang}" \
+			-F "file=@${_file_dir}/${i}" \
+			-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+			"https://hackerone.com/attachments")"
+
+			[ "${_response_code}" != "200" ] && \
+			doc_error "could not upload file: ${i} ${_response_code} ${_response_body}"
+
+			_tmp_file_key=$(echo "${_response_body}" | jq -r '.id')
+			_attachment_post="${_attachment_post}&report[attachment_ids][]=${_tmp_file_key}"
+
+		done
+
+		doc_action "uploading inline attachments..."
+		for i in "${!_files[@]}"
+		do
+			doc_action "uploading file... ${_files[$i]}"
+
+			curl_parse "$(curl -X POST -H "Accept: application/json" -H "Expect: " -H "${_user_agent}" -H "${_accept_lang}" \
+			-F "file=@${_file_dir}/${_files[$i]}" \
+			-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+			"https://hackerone.com/attachments")"
+
+			[ "${_response_code}" != "200" ] && \
+			doc_error "could not upload file: ${_files[$i]} ${_response_code} ${_response_body}"
+
+			_tmp_file_key=$(echo "${_response_body}" | jq -r '.id')
+			doc_action "replacing inline in description/impact with {F${_tmp_file_key}}"
+			_description=$(echo "${_description}" | ${_sed_bin} "s/{UPLOAD${_file_keys[$i]}}/{F${_tmp_file_key}}/")
+			_impact=$(echo "${_impact}" | ${_sed_bin} "s/{UPLOAD${_file_keys[$i]}}/{F${_tmp_file_key}}/")
+			_attachment_post="${_attachment_post}&report[attachment_ids][]=${_tmp_file_key}"
+		done
+
+		_attachment_post=$(echo "${_attachment_post}" | ${_sed_bin} -r 's/(^&|&$)//g')
+
+	;;
+	report-send)
+
+		doc_action "submitting report..."
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+		--data-urlencode "draft_id=${_draft_id}" \
+		--data-urlencode "report[title]=${_title}" \
+		--data-urlencode "report[vulnerability_information]=${_description}" \
+		--data-urlencode "report[impact]=${_impact}" \
+		--data-urlencode "report[weakness_id]=${_weakness_id}" \
+		--data-urlencode "report[structured_scope_id]=${_asset_id}" \
+		--data-urlencode "report[ignore_triggers]=true" \
+		--data "${_optional_data}" \
+		--data "${_context_data}" \
+		--data "${_attachment_post}" \
+		"https://hackerone.com/${_program}/reports")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not submit report: ${_response_code} ${_response_body}"
+
+		_report_id=$(echo "${_response_body}" | jq -r '.report_id')
+		_report_ref="https://hackerone.com/reports/${_report_id}"
+
+		mark_report_done "${_report_ref}"
+
+	;;
+	*)
+		die "Unknown command"
+	;;
+	esac
+}
+
+doc () { printf '%-30s \e[38;5;22m%s\e[m\n' "${1:-}" "${2:-}"; }
+doc_attr () { printf '\033[35m%s\033[0m \e[37m%s\e[m\n' "${1:-}" "${2:-}"; }
+doc_report () { printf '\033[33m%s\e[0m\n' "${1}"; }
+doc_action () { printf '\033[32m*** %s\e[0m\n' "${1}"; }
+doc_success () { printf '\033[36m*** %s\e[0m\n' "${1}"; }
+doc_select () { printf '\033[35m%s\e[0m\n' "$(echo "${1}" | ${_sed_bin} 's/^/   /')"; }
+doc_error() { printf '\033[31m### %s\e[0m\n' "${1}"; die; }
+
+case ${_command} in
+version)
+	echo "v${_version}"
+;;
+help)
+	echo ''
+	echo "bountyplz v${_version}"
+	echo ''
+	doc 'help' 'this list of help'
+	doc 'version' 'show version of bountyplz'
+	echo ''
+	doc 'h1 <program> <markdown-file>' 'submit report to a hackerone program'
+	doc '  -p to preview only'
+	doc '  -d to save draft only'
+	doc '  -f to force report (ignore being already reported)'
+	echo ''
+	doc 'h1 -p <markdown-file>' 'to only preview the parsing of the file'
+	echo ''
+	echo ''
+;;
+h1)
+	h1_init $@
+	h1_parse "${_report_file}"
+	h1_preview
+
+	if [ "${_preview}" != "1" ]; then
+		doc_action "sending report..."
+		#check if signed in
+		h1_api "current_user"
+		_signed_in=$(echo "${_user_info}" | jq $'.["signed_in?"]')
+		_csrf_token=$(echo "${_user_info}" | jq -r $'.["csrf_token"]')
+		if [ "${_signed_in}" == "false" ]; then
+			h1_api "sign-in"
+		else
+			doc_success "already signed in!"
+		fi
+	
+		h1_api "validate-program"
+		h1_api "report-attributes"
+		h1_api "upload-files"
+		h1_api "report-draft"
+		if [ "${_draft}" != "1" ]; then
+			h1_api "report-send"
+			doc_success "report submitted: ${_report_id}"
+			doc_success "${_report_ref}"
+		fi
+	fi
+
+;;
+*)
+	die "Unknown command"
+;;
+esac
