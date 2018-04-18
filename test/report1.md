@@ -1,5 +1,4 @@
 ---
-report: https://hackerone.com/reports/340072
 weakness: "xss reflected"
 severity: high
 attachments: ["ok.txt", "ja.csv"]
