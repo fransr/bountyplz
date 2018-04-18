@@ -128,7 +128,8 @@ h1_parse () {
 	_report=$(${_sed_bin} '1 { /^---/ { :a N; /\n---/! ba; d} }' "${1}")
 	#fetch first #-header in the markdown as title
 
-	_title=$(echo "${_report}" | grep -m1 -E '^#[ ]' | head -n 1 || echo "" | ${_sed_bin} -e 's/^#[ ]//')
+	_title=$(echo "${_report}" | grep -m1 -E '^#[ ]' | head -n 1 || echo "")
+	_title=$(echo "${_title}" | ${_sed_bin} -e 's/^#[ ]//')
 
 	[ ${#_title} -le 150 ] || doc_error "report title needs to be maximum 150 characters"
 
