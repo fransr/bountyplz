@@ -350,16 +350,35 @@ h1_api() {
 		[ "${_response_code}" != "200" ] && \
 			doc_error "could not sign in: ${_response_code} ${_response_body}"
 
+		_h1_otp=$(echo "${_response_body}" | jq -r '.result_code')
+		_otp_data="&"
+		_otp_code=""
+
+		if [ "${_h1_otp}" == "provide-otp-code" ]; then
+			doc_notice "2fa needed"
+			echo -n "enter 2fa code: "
+			read _otp_code
+		fi
+
+		if [ "${_otp_code}" != "" ]; then
+			_otp_data="&user[totp_code]=${_otp_code}"
+		fi
+
 		doc_action "signing in..."
 		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
 			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
 			-X POST --data-urlencode "authenticity_token=${_csrf_token}" \
 			--data-urlencode "user[email]=${_h1_username}" \
 			--data-urlencode "user[password]=${_h1_password}" \
+			--data-urlencode "user[remember_me]=true" \
+			--data "${_otp_data}" \
 			"https://hackerone.com/users/sign_in")"
 
 		[ "${_response_code}" != "302" ] && \
 			doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+		# we need to do this to get the csrf-token
+		h1_api "current_user"
 
 		doc_success "signed in successfully!"
 
@@ -552,6 +571,7 @@ doc_attr () { printf '\033[35m%s\033[0m \e[37m%s\e[m\n' "${1:-}" "${2:-}"; }
 doc_report () { printf '\033[33m%s\e[0m\n' "${1}"; }
 doc_action () { printf '\033[32m*** %s\e[0m\n' "${1}"; }
 doc_success () { printf '\033[36m*** %s\e[0m\n' "${1}"; }
+doc_notice () { printf '\033[35m*** %s\e[0m\n' "${1}"; }
 doc_select () { printf '\033[35m%s\e[0m\n' "$(echo "${1}" | ${_sed_bin} 's/^/   /')"; }
 doc_error() { printf '\033[31m### %s\e[0m\n' "${1}"; die; }
 
@@ -591,7 +611,8 @@ h1)
 		else
 			doc_success "already signed in!"
 		fi
-	
+		_csrf_token=$(echo "${_user_info}" | jq -r $'.["csrf_token"]')
+
 		h1_api "validate-program"
 		h1_api "report-attributes"
 		h1_api "upload-files"

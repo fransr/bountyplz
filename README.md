@@ -6,7 +6,7 @@ This is a project created by [Frans Rosén](https://twitter.com/fransrosen). The
 
 bountyplz currently only supports submitting to HackerOne.
 
-bountyplz will sign in to HackerOne and keep the session, create a draft and submit the report, all in one step.
+bountyplz will sign in to HackerOne and keep the session, create a draft and submit the report, all in one step. It also supports 2FA, if this is enabled on your HackerOne-account.
 
 <img src="https://github.com/fransr/bountyplz/raw/documentation-files/preview/preview1.png" width="700" />
 
@@ -121,6 +121,5 @@ find . -name "*.md" \( -exec bountyplz h1 <program> {} \; -o -quit \)
 
 ### todo
 
-* Add 2FA-support
 * Add Bugcrowd: `bountyplz bc mastercard reports/report.md`
 
