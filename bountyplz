@@ -149,8 +149,6 @@ h1_parse () {
 
 	_weakness=$(frontmatter_parse "${_frontmatter}" "weakness")
 	_severity=$(frontmatter_parse "${_frontmatter}" "severity")
-	_context_url=$(frontmatter_parse "${_frontmatter}" "url")
-	_context_inj_type=$(frontmatter_parse "${_frontmatter}" "injection-type")
 
 	# at this point, the whole report is in $_report
 	# we will now divide it into desc and impact
@@ -198,8 +196,6 @@ h1_preview () {
 	[ "${#_files[@]}" -gt 0 ] && doc_attr "inline-attachments:" $(IFS=, ; echo "${_files[*]}")
 	[ "${_severity}" != "" ] && doc_attr "severity:" "${_severity}"
 	[ "${_asset}" != "" ] && doc_attr "asset:" "${_asset}"
-	[ "${_context_url}" != "" ] && doc_attr "url:" "${_context_url}"
-	[ "${_context_inj_type}" != "" ] && doc_attr "injection-type:" "${_context_inj_type}"
 	echo "---"
 }
 
@@ -218,7 +214,6 @@ list_selector() {
 	_list_pattern="$5"
 	_id_pattern="$6"
 	_direct_match_pattern="$7"
-	_context_pattern="${8:-}"
 
 	_data="$(echo "${_fulldata}" | jq --arg w "${_check}" "${_select_pattern}")"
 
@@ -246,73 +241,6 @@ list_selector() {
 		_list_id=$(echo "${_data}" | jq -r --arg w_id "${_list_id}" "${_id_pattern}")
 	else
 		_list_id=$(echo "${_data}" | jq -r "${_direct_match_pattern}")
-	fi
-
-	if [ "${_name}" == "weakness" ]; then
-		_context_data=""
-		_context=$(echo "${_data}" | jq -r --arg w_id "${_list_id}" "${_context_pattern}")
-		if [ "${_context}" != "null" ]; then
-			doc_action "context found (needs additional data) ${_context}"
-			case "${_context}" in
-				XssStoredContext|ClickJackingContext|CsrfContext)
-					[ "${_context_url}" == "" ] && doc_select "context-url needed" && echo -n "enter context url: " && read _context_url
-					_context_url=$(echo "${_context_url}" | sed 's/&/%26/g')
-					_context_data="${_context_data}&report[weakness_context][url]=${_context_url}"
-
-					if [[ $_context =~ ^ClickJackingContext|CsrfContext$ ]]; then
-						_context_data="${_context_data}&report[weakness_context][tricks_user]=true"
-						_context_data="${_context_data}&report[weakness_context][state_change_operation]=See+above"
-					fi
-					if [[ $_context =~ ^XssStoredContext|CsrfContext$ ]]; then
-						_context_data="${_context_data}&report[weakness_context][verified]=true"
-					fi
-
-					doc_action "context-data set for weakness"
-				;;
-				SqlInjectionContext)
-					_context_data="${_context_data}&report[weakness_context][verified]=true"
-					_context_data="${_context_data}&report[weakness_context][verification_attempt_results]=See+above"
-
-					[ "${_context_inj_type}" == "" ] && doc_select "context-injection-type needed" && echo -n "enter context-injection-type: " && read _context_inj_type
-
-					doc_action "matching injection type: '${_context_inj_type}' against list..."
-			
-					_parent_list_id="${_list_id}"
-
-					_context_inj_check=$(echo "${_context_inj_type}" | ${_sed_bin} $'s/ /\.\*/g')
-					_context_inj_list=$(echo -n $'Classic / In-Band\nOut-of-Band\nBlind / Inferential\nUNION Operation\nBoolean\nError based\nTime delay' | \
-					jq --raw-input --slurp 'split("\n")')
-					# type, list, check, select pattern, list pattern, id pattern, direct pattern, context pattern
-					list_selector \
-						"injection type" \
-						"$(echo -n $'Classic / In-Band\nOut-of-Band\nBlind / Inferential\nUNION Operation\nBoolean\nError based\nTime delay' | \
-							jq --raw-input --slurp 'split("\n")')" \
-						"${_context_inj_check}" \
-						'[ .[] | select(. | match($w; "i")) ] | to_entries' \
-						'.[] | "* " + (.key|tostring) + " - " + .value' \
-						'.[] | select(.key == ($w_id|tonumber)) | .value' \
-						'.[] | .value'
-			
-					_context_inj_id="${_list_id}"
-					_context_inj_type=$(echo "${_context_inj_id}" | sed 's/&/%26/g')
-					_context_data="${_context_data}&report[weakness_context][exploitation_technique]=${_context_inj_type}"
-
-					# put back parent list id
-					_list_id="${_parent_list_id}"
-					
-				;;
-				SsrfContext)
-					_context_data="${_context_data}&report[weakness_context][verified]=true"
-					_context_data="${_context_data}&report[weakness_context][bypasses_nac]=true"
-					_context_data="${_context_data}&report[weakness_context][internal_services]=See+above"
-					_context_data="${_context_data}&report[weakness_context][impact]=%23"
-				;;
-				*)
-					doc_error "unknown context: ${_context}, unknown fields needed"
-				;;
-			esac
-		fi
-
 	fi
 
 	if [ "${_list_id}" == "" ]; then
@@ -405,7 +333,7 @@ h1_api() {
 		doc_action "matching weakness: '${_weakness}' against list..."
 
 		_weakness_check=$(echo "${_weakness}" | ${_sed_bin} $'s/ /\.\*/g')
-		# type, list, check, select pattern, list pattern, id pattern, direct pattern, context pattern
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern
 		list_selector \
 			"weakness" \
 			"${_response_body}" \
@@ -413,8 +341,7 @@ h1_api() {
 			'[ .weaknesses[] | select(.name | match($w; "i")) ]' \
 			'[ .[] | "* " + (.id|tostring) + " - " + .name ] | .[]' \
 			'.[] | select(.id == ($w_id|tonumber)) | .id' \
-			'.[] | .id' \
-			'.[] | select(.id == ($w_id|tonumber)) | .context_type'
+			'.[] | .id'
 
 		_weakness_id="${_list_id}"
 
@@ -437,7 +364,7 @@ h1_api() {
 
 		doc_action "matching asset: '${_asset}' against list..."
 
-		_asset_check=$(echo "${_asset}" | ${_sed_bin} $'s/ /\.\*/g')
+		_asset_check=$(echo "${_asset}" | ${_sed_bin} $'s/\*/\\\*/g' | ${_sed_bin} $'s/ /\.\*/g')
 		# type, list, check, select pattern, list pattern, id pattern, direct pattern
 		list_selector \
 			"asset" \
@@ -547,7 +474,6 @@ h1_api() {
 		--data-urlencode "report[structured_scope_id]=${_asset_id}" \
 		--data-urlencode "report[ignore_triggers]=true" \
 		--data "${_optional_data}" \
-		--data "${_context_data}" \
 		--data "${_attachment_post}" \
 		"https://hackerone.com/${_program}/reports")"
 
