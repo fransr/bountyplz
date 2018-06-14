@@ -1,14 +1,18 @@
-# bountyplz – automated security reporting from markdown templates
+# bountyplz – automated security reporting from markdown templates
 
 ### description
 
 This is a project created by [Frans Rosén](https://twitter.com/fransrosen). The idea is to be able to submit a report without any interaction. It's taking advantage of all features the existing site has, such as attachments, inline images, assets, weaknesses and severity.
 
-bountyplz currently only supports submitting to HackerOne.
+bountyplz supports submitting to HackerOne and Bugcrowd.
 
-bountyplz will sign in to HackerOne and keep the session, create a draft and submit the report, all in one step. It also supports 2FA, if this is enabled on your HackerOne-account.
+bountyplz will sign in to HackerOne or Bugcrowd and keep the session, create a draft and submit the report, all in one step. It also supports 2FA, if this is enabled on your HackerOne- or Bugcrowd-account.
 
+HackerOne:
 <img src="https://github.com/fransr/bountyplz/raw/documentation-files/preview/preview1.png" width="700" />
+
+Bugcrowd:
+<img src="https://github.com/fransr/bountyplz/raw/documentation-files/preview/preview3.png" width="700" />
 
 ### install
 
@@ -33,7 +37,14 @@ bountyplz h1 <program> <markdown-file>
 
 ### usage Bugcrowd `bc`
 
-Coming soon!
+Place `.env` with `BUGCROWD_USERNAME` and `BUGCROWD_PASSWORD` next to the binary.
+
+```
+bountyplz bc <program> <markdown-file>
+```
+
+`-p` for preview<br />
+`-d` for draft-only (will upload files but not save any draft as this is currently not supported on Bugcrowd)
 
 ### howto
 
@@ -58,7 +69,7 @@ The following attributes are currently supported:
 |`asset`|string|will be matched against the list of assets for the program|
 |`weakness`|string|will be matched against the list of weaknesses for the program. |
 |`attachments`|json-array|list of files that should be attached. `["test.jpg","test2.jpg"]`<br />if images and videos are used inline, these does not need to be in this list|
-|`severity`|string|`none, low, medium, high, crical`|
+|`severity`|string|`none, low, medium, high, crical` (HackerOne only)|
 
 When the report is submitted, an additional `report`-attribute will be added to the markdown with the reference URL for the report. This is to make sure the same report is not submitted twice.
 
@@ -68,7 +79,7 @@ When the report is submitted, an additional `report`-attribute will be added to 
 
 ### impact
 
-If any header with the word `impact` exist in the report, the report will be split in half and the content after Impact will be inserted in the Impact-field. If no Impact exists in the report, the Impact field will only contain a `#` rendering it empty.
+For HackerOne, if any header with the word `impact` exist in the report, the report will be split in half and the content after Impact will be inserted in the Impact-field. If no Impact exists in the report, the Impact field will only contain a `#` rendering it empty.
 
 ```md
 ---
@@ -83,6 +94,8 @@ Report description
 
 This will be in the impact field.
 ```
+
+For Bugcrowd, the whole report will be inside the Description-field.
 
 ### inline attachments
 
@@ -121,8 +134,3 @@ This command will run all markdown files and report them. If a report already ha
 ```
 find . -name "*.md" \( -exec bountyplz h1 <program> {} \; -o -quit \)
 ```
-
-### todo
-
-* Add Bugcrowd: `bountyplz bc mastercard reports/report.md`
-
