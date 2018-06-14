@@ -1,0 +1,324 @@
+bc_init () {
+	[ "${_bc_username}" != "" ] || die 'error: BUGCROWD_USERNAME env-variable required'
+	[ "${_bc_password}" != "" ] || die 'error: BUGCROWD_PASSWORD env-variable required'
+	_program=""
+	_report_file=""
+	_preview=""
+	_draft=""
+	_force=""
+	report_args "$@"
+}
+
+_bc_username="${BUGCROWD_USERNAME:-}"
+_bc_password="${BUGCROWD_PASSWORD:-}"
+_bc_session_file="${_bin_path}/.bc-session"
+
+bc_parse () {
+    parse "${1}"
+
+	[ $_attachment_count -gt 5 ] && doc_error "maximum 5 attachments allowed on bugcrowd, current: ${_attachment_count}"
+
+	:
+}
+
+bc_preview () {
+    preview
+}
+
+file_mime () {
+	trim $(file --mime-type "$1" | cut -d ":" -f 2)
+}
+curlencode () {
+	first=$(urlencode "$(echo "${1}" | cut -d "=" -f 1)")
+	second=$(urlencode "$(echo "${1}" | cut -d "=" -f 2-)" | sed 's/%2F/\//g' | \
+		sed 's/%7B/\{/g' | sed 's/%7D/\}/g' | sed 's/%24/\$/g' | sed 's/%3D/=/g')
+	echo "${first}=${second}"
+}
+
+bc_file_upload () {
+
+	_dir="$1"
+	_file="$2"
+	curl_parse "$(curl -X GET -H "Accept: application/json" -H "Expect: " -H "${_user_agent}" -H "${_accept_lang}" \
+		-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+		"https://bugcrowd.com/attachments/new?bounty_uuid=${_report_uuid}")"
+
+	_upload_url_params=$(echo "${_response_body}" | \
+		jq -r '.["form-data"] | to_entries[] | .key + "=" + .value')
+
+	_curl_args=""
+	for v in ${_upload_url_params}
+	do
+		_encoded_var=$(curlencode "${v}")
+		_curl_args="${_curl_args} -F ${_encoded_var}"
+	done
+	_upload_url=$(echo "${_response_body}" | jq -r '.url')
+
+	curl_parse "$(curl -X POST -H "Expect: " -H "${_user_agent}" -H "${_accept_lang}" \
+		$_curl_args \
+		-F "file=@${_dir}/${_file}" -sD - \
+		"$_upload_url")"
+
+	[ "${_response_code}" != "201" ] && \
+	doc_error "could not upload file: ${_file} ${_response_code} ${_response_body}"
+
+	_tmp_file_key=$(echo "${_response_body}" | grep -oE '<Location>[^<]+<' | cut -d '>' -f 2 | cut -d '<' -f 1)
+	_tmp_file_size=$(wc -c < "${_dir}/${_file}" | sed -E 's/[^0-9]+//g')
+	_tmp_file_mime=$(file_mime "${_dir}/${_file}")
+
+	_tmp_file_json=$(jq --arg file_name "${_file}" --arg file_size "${_tmp_file_size}" \
+		--arg file_type "${_tmp_file_mime}" --arg s3_url "${_tmp_file_key}" \
+		-n -c '{file_name: $file_name, file_size: ($file_size|tonumber), file_type: $file_type, s3_url: $s3_url}' | sed 's/&/%26/g')
+
+	_tmp_file_json=$(urlencode "${_tmp_file_json}")
+
+	_attachment_post="${_attachment_post}&file_attachments[]=${_tmp_file_json}"
+}
+
+bc_api() {
+	case "${1}" in
+	current_user)
+		doc_action "fetching current user..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" \
+            -b "${_bc_session_file}" -c "${_bc_session_file}" -sD - "https://bugcrowd.com/user/sign_in")"
+
+		_user_info="${_response_body}"
+		_signed_in="false"
+
+		if [ "${_response_code}" == "302" ]; then
+
+			_signed_in="true"
+			_next_location=$(trim $(echo "${_response_headers}" | grep -Ei '^Location' | cut -d ":" -f 2-))
+
+			# we know the user has signed in, but not if 2fa is done or not, check next_location
+			curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" \
+	            -b "${_bc_session_file}" -c "${_bc_session_file}" -sD - "${_next_location}")"
+
+			bc_api "2fa-check"
+
+		fi
+
+	;;
+	2fa-check)
+
+		doc_action "checking if 2fa is enabled and working"
+
+		_bc_otp=$(echo "${_response_headers}" | grep "Location: https://bugcrowd.com/user/two_factor_authentication" || echo "")
+
+		if [ "${_bc_otp}" != "" ]; then
+
+			_signed_in="false"
+			doc_action "2fa is active, fetching csrf-token..."
+
+			curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" \
+				-H "Referer: https://bugcrowd.com/user/sign_in" \
+				-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+				-X GET "https://bugcrowd.com/user/two_factor_authentication")"
+	
+			_csrf_token=$(echo "${_response_body}" | grep -oE '"authenticity_token" value="[^"]+"' | cut -d '"' -f 4)
+	
+			doc_notice "2fa needed"
+			echo -n "enter 2fa code: "
+			read _otp_code
+	
+			if [ "${_otp_code}" != "" ]; then
+				curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" \
+					-H "Referer: https://bugcrowd.com/user/two_factor_authentication" \
+					--data "utf8=%E2%9C%93&_method=put&commit=Authenticate" \
+					--data-urlencode "authenticity_token=${_csrf_token}" \
+					--data-urlencode "otp_attempt=${_otp_code}" \
+					-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+					-X POST "https://bugcrowd.com/user/two_factor_authentication")"
+	
+				[ "${_response_code}" != "302" ] && \
+					doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+				doc_action "signed in successfully with 2fa!"
+				_signed_in="true"
+			else
+				doc_error "could not sign in: 2fa needed"
+			fi
+		fi
+	;;
+	sign-in)
+		# session call
+		doc_action "signing in..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" -H "Origin: https://bugcrowd.com" \
+			-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+			-X POST --data-urlencode "user[email]=${_bc_username}" \
+			--data-urlencode "user[password]=${_bc_password}" \
+			--data-urlencode "authenticity_token=${_csrf_token}" \
+			--data-urlencode "commit=Log+in" \
+			--data "utf8=%E2%9C%93" \
+			"https://bugcrowd.com/user/sign_in")"
+
+		[ "${_response_code}" != "302" ] && \
+			doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+		_next_location=$(trim $(echo "${_response_headers}" | grep -Ei '^Location' | cut -d ":" -f 2-))
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" \
+			-H "Referer: https://bugcrowd.com/user/sign_in" \
+			-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+			-X GET "${_next_location}")"
+
+		bc_api "2fa-check"
+
+		# we need to do this to get the csrf-token
+		# bc_api "current_user"
+
+		doc_success "signed in successfully!"
+
+	;;
+	validate-program)
+		doc_action "validating program..."
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Accept: text/html" \
+			-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - "https://bugcrowd.com/${_program}/report")"
+
+		if [ "${_response_code}" != "200" ]; then
+			doc_error "could not find program '${_program}': ${_response_code}"
+		fi
+		
+		_user_info="${_response_body}"
+	;;
+	report-attributes)
+
+		doc_action "finding report attributes..."
+
+		doc_action "fetching weaknesses..."
+
+		_vrt=$(echo "${_response_body}" | \
+			grep -oE '<div data-react-class="VrtDropdown" data-react-props="[^"]+"' | \
+			cut -d '"' -f 4 | sed 's/&quot;/"/g' | jq '.')
+
+		c=$(echo "${_vrt}" | \
+			jq '.options[] as $root | $root.children[]? as $parent | $parent.children[]? as $child | {root: $root, parent: $parent, child: $child} | {name: (.root.name + " / " + .parent.name + " / " + .child.name), id: (.root.id + "." + .parent.id + "." + .child.id)}' | \
+			jq -s '.')
+
+		p=$(echo "${_vrt}" | \
+			jq '.options[] as $root | $root.children[]? as $parent | {root: $root, parent: $parent} | {name: (.root.name + " / " + .parent.name), id: (.root.id + "." + .parent.id)}' | \
+			jq -s '.')
+		
+		r=$(echo "${_vrt}" | \
+			jq '.options[] as $root | {root: $root} | {name: (.root.name), id: (.root.id)}' | \
+			jq -s '.')
+		
+		_weakness_list=$(jq -n --arg r "$r" --arg p "$p" --arg c \
+			"$c" "$c + $p + $r | to_entries | map({name: .value.name, id: .value.id, key: (.key+1)})")
+
+		doc_action "matching weakness: '${_weakness}' against list..."
+
+		_weakness_check=$(echo "${_weakness}" | ${_sed_bin} $'s/ /\.\*/g')
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern
+		list_selector \
+			"weakness" \
+			"${_weakness_list}" \
+			"${_weakness_check}" \
+			'[ .[] | select(.name | match($w; "i")) ]' \
+			'[ .[] | "* " + (.key|tostring) + " - " + .name ] | .[]' \
+			'.[] | select(.key == ($w_id|tonumber)) | .id' \
+			'.[] | .id'
+
+		_weakness_id="${_list_id}"
+
+		doc_action "fetching assets..."
+
+		_asset_list=$(echo "${_response_body}" | ${_sed_bin} -n '/submission\[target_id\]/,/<\/select>/{p}' | \
+			grep -oE '<option value="[^"]+">[^<]+<\/' | cut -d '"' -f 2,3 | ${_sed_bin} 's/">/>/' | \
+			${_sed_bin} 's/<\///' | jq --slurp --raw-input \
+			'split("\n") | map(split(">") | select(length > 0)) | .[] | {id: .[0], name: .[1]}' | \
+			jq -s '.' | jq 'to_entries | map({name: .value.name, id: .value.id, key: (.key+1)})')
+
+		doc_action "matching asset: '${_asset}' against list..."
+
+		_asset_check=$(echo "${_asset}" | ${_sed_bin} $'s/\*/\\\*/g' | ${_sed_bin} $'s/ /\.\*/g')
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern
+		list_selector \
+			"asset" \
+			"${_asset_list}" \
+			"${_asset_check}" \
+			'[ .[] | select(.name | match($w; "i")) ]' \
+			'[ .[] | "* " + (.key|tostring) + " - " + .name ] | .[]' \
+			'.[] | select(.key == ($w_id|tonumber)) | .id' \
+			'.[] | .id'
+
+		_asset_id="${_list_id}"
+
+		if [ "${_asset_id}" == "" ]; then
+			_asset_id="0"
+		fi
+
+	;;
+	upload-files)
+
+		# use uuid from report-page
+		_report_uuid=$(echo "${_response_body}" | grep -oE "bounty_uuid=[^&]+" | cut -d '=' -f2)
+
+		# we have two set of files, $_files and a json with attachments. files needs to be
+		# modifying the report
+		_attachment_post=""
+		doc_action "uploading attachments..."
+
+		for i in $(echo "${_attachments}" | jq -r '.[]')
+		do
+			doc_action "uploading file... $i"
+
+			bc_file_upload "${_file_dir}" "${i}"
+
+		done
+
+		doc_action "uploading inline attachments..."
+		for i in "${!_files[@]}"
+		do
+			doc_action "uploading file... ${_files[$i]}"
+
+			bc_file_upload "${_file_dir}" "${_files[$i]}"
+
+			doc_action "replacing inline in report with {${_files[$i]}}"
+
+			_report=$(echo "${_report}" | ${_sed_bin} "s/{UPLOAD${_file_keys[$i]}}/{${_files[$i]}}/")
+			
+		done
+
+		_attachment_post=$(echo "${_attachment_post}" | ${_sed_bin} -r 's/(^&|&$)//g')
+
+	;;
+	report-send)
+
+		doc_action "submitting report..."
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+		--data-urlencode "authenticity_token=${_csrf_token}" \
+		--data-urlencode "submission[submitted_from_url]=" \
+		--data-urlencode "submission[caption]=${_title}" \
+		--data-urlencode "submission[target_id]=${_asset_id}" \
+		--data-urlencode "submission[vrt_id]=${_weakness_id}" \
+		--data-urlencode "submission[bug_url]=" \
+		--data-urlencode "submission[description]=${_report}" \
+		--data "${_attachment_post}" \
+		--data-urlencode "submission[terms_and_conditions]=1" \
+		"https://bugcrowd.com/${_program}/report")"
+
+		[ "${_response_code}" != "302" ] && \
+			doc_error "could not submit report: ${_response_code} ${_response_body}"
+
+		doc_action "fetching report id..."
+
+		curl_parse "$(curl -X GET -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_bc_session_file}" -c "${_bc_session_file}" -sD - \
+			"https://bugcrowd.com/submissions")"
+
+		_report_id=$(echo "${_response_body}" | grep -oE '&quot;reference_number&quot;:&quot;[a-z0-9]+' | \
+			head -n 1 | rev | cut -d ";" -f1 | rev)
+		_report_ref="https://bugcrowd.com/submissions/${_report_id}"
+
+		mark_report_done "${_report_ref}"
+
+	;;
+	*)
+		die "Unknown command"
+	;;
+	esac
+}

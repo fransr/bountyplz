@@ -1,0 +1,278 @@
+h1_init () {
+	[ "${_h1_username}" != "" ] || die 'error: HACKERONE_USERNAME env-variable required'
+	[ "${_h1_password}" != "" ] || die 'error: HACKERONE_PASSWORD env-variable required'
+	_program=""
+	_report_file=""
+	_preview=""
+	_draft=""
+	_force=""
+	report_args "$@"
+}
+
+_h1_username="${HACKERONE_USERNAME:-}"
+_h1_password="${HACKERONE_PASSWORD:-}"
+_h1_session_file="${_bin_path}/.h1-session"
+
+h1_parse () {
+    parse "${1}"
+
+	# h1-specific rules
+
+	#divide report into desc and impact
+	_description=$(echo "${_report}" | ${_sed_bin} -n -e '/^#* impact/Iq;p')
+
+	#divide report into desc and impact
+	_impact=$(trim "$(echo "${_report}" | ${_sed_bin} -n -e '/^#* impact/I,${//d;p}')")
+
+	#allow empty impact
+	if [ "${_impact}" == "" ]; then _impact="#"; fi
+
+	# empty report so we dont accidentially use it
+	_report=""
+
+	[ ${#_title} -le 150 ] || doc_error "report title needs to be maximum 150 characters"
+	[ "${_description}" != "" ] || doc_error "description not found"
+}
+
+h1_preview () {
+    preview 
+}
+
+h1_upload_file () {
+
+	_dir="${1}"
+	_file="${2}"
+
+	curl_parse "$(curl -X POST -H "Accept: application/json" -H "Expect: " -H "${_user_agent}" -H "${_accept_lang}" \
+	-F "file=@${_dir}/${_file}" \
+	-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+	"https://hackerone.com/attachments")"
+
+	[ "${_response_code}" != "200" ] && \
+	doc_error "could not upload file: ${file} ${_response_code} ${_response_body}"
+
+	_tmp_file_key=$(echo "${_response_body}" | jq -r '.id')
+	_attachment_post="${_attachment_post}&report[attachment_ids][]=${_tmp_file_key}"
+}
+
+h1_api() {
+	case "${1}" in
+	current_user)
+		doc_action "fetching current user..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user")"
+
+		[ "${_response_code}" == "302" ] && doc_action "redirect, try again..." && \
+			curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+				-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not fetch current user: ${_response_code} ${_response_body}"
+		# save session
+		_user_info="${_response_body}"
+	;;
+	sign-in)
+		# session call
+		doc_action "fetching session..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+			-X POST --data-urlencode "email=${_h1_username}" \
+			--data-urlencode "password=${_h1_password}" \
+			-H "X-CSRF-Token: ${_csrf_token}" "https://hackerone.com/sessions")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+		_h1_otp=$(echo "${_response_body}" | jq -r '.result_code')
+		_otp_data="&"
+		_otp_code=""
+
+		if [ "${_h1_otp}" == "provide-otp-code" ]; then
+			doc_notice "2fa needed"
+			echo -n "enter 2fa code: "
+			read _otp_code
+		fi
+
+		if [ "${_otp_code}" != "" ]; then
+			_otp_data="&user[totp_code]=${_otp_code}"
+		fi
+
+		doc_action "signing in..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+			-X POST --data-urlencode "authenticity_token=${_csrf_token}" \
+			--data-urlencode "user[email]=${_h1_username}" \
+			--data-urlencode "user[password]=${_h1_password}" \
+			--data-urlencode "user[remember_me]=true" \
+			--data "${_otp_data}" \
+			"https://hackerone.com/users/sign_in")"
+
+		[ "${_response_code}" != "302" ] && \
+			doc_error "could not sign in: ${_response_code} ${_response_body}"
+
+		# we need to do this to get the csrf-token
+		h1_api "current_user"
+
+		doc_success "signed in successfully!"
+
+	;;
+	validate-program)
+		doc_action "validating program..."
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+			-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/${_program}/reports/new")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not find program '${_program}': ${_response_code}"
+
+		:
+	;;
+	report-attributes)
+
+		doc_action "finding report attributes..."
+
+		doc_action "fetching weaknesses..."
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/${_program}/weaknesses")"
+
+		doc_action "matching weakness: '${_weakness}' against list..."
+
+		_weakness_check=$(echo "${_weakness}" | ${_sed_bin} $'s/ /\.\*/g')
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern
+		list_selector \
+			"weakness" \
+			"${_response_body}" \
+			"${_weakness_check}" \
+			'[ .weaknesses[] | select(.name | match($w; "i")) ]' \
+			'[ .[] | "* " + (.id|tostring) + " - " + .name ] | .[]' \
+			'.[] | select(.id == ($w_id|tonumber)) | .id' \
+			'.[] | .id'
+
+		_weakness_id="${_list_id}"
+
+		doc_action "fetching graphql-token..."
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user/graphql_token.json")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not fetch graphql-token: ${_response_code} ${_response_body}"
+		
+		_h1_gql_token=$(echo "${_response_body}" | jq -r '.graphql_token')
+
+		doc_action "fetching assets..."
+
+		_assets_gql_query=$(echo '{"query":"$query"}' | jq --arg p "${_program}" '.query = "query Structured_scopes_selector { query { assets:team(handle:\"" + $p + "\") { list:structured_scopes(first:100,archived:false) { edges { node { _id, asset_identifier, eligible_for_submission } } } } } }"')
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-Auth-Token: ${_h1_gql_token}" -H "Content-Type: application/json" --data "${_assets_gql_query}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/graphql")"
+
+		doc_action "matching asset: '${_asset}' against list..."
+
+		_asset_check=$(echo "${_asset}" | ${_sed_bin} $'s/\*/\\\*/g' | ${_sed_bin} $'s/ /\.\*/g')
+		# type, list, check, select pattern, list pattern, id pattern, direct pattern
+		list_selector \
+			"asset" \
+			"${_response_body}" \
+			"${_asset_check}" \
+			'[ .data.query.assets.list.edges[].node | select (.eligible_for_submission == true) | select(.asset_identifier | match($w; "i")) ]' \
+			'[ .[] | "* " + (._id|tostring) + " - " + .asset_identifier ] | .[]' \
+			'.[] | select(._id == $w_id) | ._id' \
+			'.[] | ._id'
+
+		_asset_id="${_list_id}"
+
+		if [ "${_asset_id}" == "" ]; then
+			_asset_id="0"
+		fi
+
+		_optional_data=""
+		if [ "${_severity}" != "" ]; then
+			_severity=$(trim "$(echo "${_severity}" | tr '[:upper:]' '[:lower:]')")
+			_optional_data="report[severity][rating]=${_severity}&report[severity][with_metrics]=false"
+		fi
+
+	;;
+	report-draft)
+
+		doc_action "sending report-draft to get draft id..."
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+		--data-urlencode "report[title]=${_title}" \
+		--data-urlencode "report[vulnerability_information]=${_description}" \
+		--data-urlencode "report[impact]=${_impact}" \
+		--data-urlencode "report[weakness_id]=${_weakness_id}" \
+		--data "${_attachment_post}" \
+		"https://hackerone.com/${_program}/reports/draft_sync")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not save draft: ${_response_code} ${_response_body}"
+
+		_draft_id=$(echo "${_response_body}" | jq -r '.id')
+
+		doc_success "draft id: ${_draft_id} saved"
+
+		if [ "${_draft}" != "" ]; then
+			doc_success "https://hackerone.com/${_program}/reports/new"
+		fi
+
+	;;
+	upload-files)
+
+		# we have two set of files, $_files and a json with attachments. files needs to be
+		# modifying the report
+		_attachment_post=""
+		doc_action "uploading attachments..."
+
+		for i in $(echo "${_attachments}" | jq -r '.[]')
+		do
+			doc_action "uploading file... $i"
+			h1_upload_file "${_file_dir}" "${i}"
+		done
+
+		doc_action "uploading inline attachments..."
+		for i in "${!_files[@]}"
+		do
+			doc_action "uploading file... ${_files[$i]}"
+			h1_upload_file "${_file_dir}" "${_files[$i]}"
+
+			doc_action "replacing inline in description/impact with {F${_tmp_file_key}}"
+			_description=$(echo "${_description}" | ${_sed_bin} "s/{UPLOAD${_file_keys[$i]}}/{F${_tmp_file_key}}/")
+			_impact=$(echo "${_impact}" | ${_sed_bin} "s/{UPLOAD${_file_keys[$i]}}/{F${_tmp_file_key}}/")
+		done
+
+		_attachment_post=$(echo "${_attachment_post}" | ${_sed_bin} -r 's/(^&|&$)//g')
+
+	;;
+	report-send)
+
+		doc_action "submitting report..."
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-CSRF-Token: ${_csrf_token}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - \
+		--data-urlencode "draft_id=${_draft_id}" \
+		--data-urlencode "report[title]=${_title}" \
+		--data-urlencode "report[vulnerability_information]=${_description}" \
+		--data-urlencode "report[impact]=${_impact}" \
+		--data-urlencode "report[weakness_id]=${_weakness_id}" \
+		--data-urlencode "report[structured_scope_id]=${_asset_id}" \
+		--data-urlencode "report[ignore_triggers]=true" \
+		--data "${_optional_data}" \
+		--data "${_attachment_post}" \
+		"https://hackerone.com/${_program}/reports")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not submit report: ${_response_code} ${_response_body}"
+
+		_report_id=$(echo "${_response_body}" | jq -r '.report_id')
+		_report_ref="https://hackerone.com/reports/${_report_id}"
+
+		mark_report_done "${_report_ref}"
+
+	;;
+	*)
+		die "Unknown command"
+	;;
+	esac
+}
