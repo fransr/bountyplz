@@ -69,6 +69,7 @@ The following attributes are currently supported:
 |`asset`|string|will be matched against the list of assets for the program|
 |`weakness`|string|will be matched against the list of weaknesses for the program. |
 |`attachments`|json-array|list of files that should be attached. `["test.jpg","test2.jpg"]`<br />if images and videos are used inline, these does not need to be in this list|
+|`url`|string|bug URL (BugCrowd only, not required)|
 |`severity`|string|`none, low, medium, high, crical` (HackerOne only)|
 
 When the report is submitted, an additional `report`-attribute will be added to the markdown with the reference URL for the report. This is to make sure the same report is not submitted twice.
