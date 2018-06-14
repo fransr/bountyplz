@@ -44,7 +44,8 @@ bountyplz bc <program> <markdown-file>
 ```
 
 `-p` for preview<br />
-`-d` for draft-only (will upload files but not save any draft as this is currently not supported on Bugcrowd)
+`-d` for draft-only (will upload files but not save any draft as this is currently not supported on Bugcrowd)<br />
+`-f` for force
 
 ### howto
 
