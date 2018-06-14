@@ -8,10 +8,10 @@ bountyplz supports submitting to HackerOne and Bugcrowd.
 
 bountyplz will sign in to HackerOne or Bugcrowd and keep the session, create a draft and submit the report, all in one step. It also supports 2FA, if this is enabled on your HackerOne- or Bugcrowd-account.
 
-HackerOne:
+HackerOne:<br />
 <img src="https://github.com/fransr/bountyplz/raw/documentation-files/preview/preview1.png" width="700" />
 
-Bugcrowd:
+Bugcrowd:<br />
 <img src="https://github.com/fransr/bountyplz/raw/documentation-files/preview/preview3.png" width="700" />
 
 ### install
