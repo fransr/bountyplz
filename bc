@@ -295,7 +295,7 @@ bc_api() {
 		--data-urlencode "submission[caption]=${_title}" \
 		--data-urlencode "submission[target_id]=${_asset_id}" \
 		--data-urlencode "submission[vrt_id]=${_weakness_id}" \
-		--data-urlencode "submission[bug_url]=" \
+		--data-urlencode "submission[bug_url]=${_url}" \
 		--data-urlencode "submission[description]=${_report}" \
 		--data "${_attachment_post}" \
 		--data-urlencode "submission[terms_and_conditions]=1" \

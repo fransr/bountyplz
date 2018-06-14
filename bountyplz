@@ -140,6 +140,7 @@ parse () {
 
 	_weakness=$(frontmatter_parse "${_frontmatter}" "weakness")
 	_severity=$(frontmatter_parse "${_frontmatter}" "severity")
+	_url=$(frontmatter_parse "${_frontmatter}" "url")
 
 	_impact="" # will be filled if needed
 
@@ -175,6 +176,7 @@ preview () {
 	doc_attr "weakness:" "${_weakness}"
 	[ "${_attachments}" != "" ] && doc_attr "attachments:" "$(echo "${_attachments}" | jq -r '.[]' | tr '\n\r' ',' | ${_sed_bin} -r 's/(^,|,$)//')"
 	[ "${#_files[@]}" -gt 0 ] && doc_attr "inline-attachments:" $(IFS=, ; echo "${_files[*]}")
+	[ "${_url}" != "" ] && doc_attr "url:" "${_url}"
 	[ "${_severity}" != "" ] && doc_attr "severity:" "${_severity}"
 	[ "${_asset}" != "" ] && doc_attr "asset:" "${_asset}"
 	echo "---"
