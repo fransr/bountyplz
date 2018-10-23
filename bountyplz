@@ -43,7 +43,6 @@ report_args () {
 		;;
 		--scope)
 			_scope="1"
-			#echo "scope option"
 		;;
 		--force|-f)
 			_force="1"
@@ -271,7 +270,6 @@ help)
 ;;
 h1)
 	h1_init "$@"
-	#echo "scope: ${_scope}"
 	if [ "${_scope}" == "1" ]; then
 		#echo "Domains in scope:"
 		h1_api "current_user"
