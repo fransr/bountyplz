@@ -127,6 +127,34 @@ h1_api() {
 
 		:
 	;;
+	scope)
+		doc_action "retrieving scope"
+
+		doc_action "fetching graphql-token..."
+
+		curl_parse "$(curl -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/current_user/graphql_token.json")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "could not fetch graphql-token: ${_response_code} ${_response_body}"
+		
+		_h1_gql_token=$(echo "${_response_body}" | jq -r '.graphql_token')
+
+		doc_action "fetching assets..."
+
+		_assets_gql_query=$(echo '{"query":"$query"}' | jq --arg p "${_program}" '.query = "query Structured_scopes_selector { query { assets:team(handle:\"" + $p + "\") { list:structured_scopes(first:100,archived:false) { edges { node { _id, asset_identifier, eligible_for_submission } } } } } }"')
+
+		curl_parse "$(curl -X POST -H "${_user_agent}" -H "${_accept_lang}" -H "Expect: " \
+		-H "X-Auth-Token: ${_h1_gql_token}" -H "Content-Type: application/json" --data "${_assets_gql_query}" -b "${_h1_session_file}" -c "${_h1_session_file}" -sD - "https://hackerone.com/graphql")"
+
+		[ "${_response_code}" != "200" ] && \
+			doc_error "error fetching socpe for '${_program}': ${_response_code}"
+
+		#echo "${_response_body}" | jq -r '[ .data.query.assets.list.edges[].node | select (.eligible_for_submission == true)]'
+		doc_action "in scope: "
+		echo "${_response_body}" | jq -r '[ .data.query.assets.list.edges[].node | select (.eligible_for_submission == true)] | .[] | .asset_identifier'
+		:
+	;;
 	report-attributes)
 
 		doc_action "finding report attributes..."
