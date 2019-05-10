@@ -19,6 +19,7 @@ Bugcrowd:<br />
 ```
 brew install jq
 brew install gnu-sed
+brew install coreutils
 
 ln -fs "$(pwd)/bountyplz" /usr/local/bin/bountyplz
 ```
