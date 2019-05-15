@@ -1,5 +1,11 @@
 # bountyplz – automated security reporting from markdown templates
 
+[![Rawsec's CyberSecurity Inventory](https://inventory.rawsec.ml/img/badges/Rawsec-inventoried-FF5050_flat.svg)](https://inventory.rawsec.ml/tools.html#bountyplz)
+[![GitHub issues](https://img.shields.io/github/issues/fransr/bountyplz.svg)](https://github.com/fransr/bountyplz/issues)
+[![GitHub forks](https://img.shields.io/github/forks/fransr/bountyplz.svg)](https://github.com/fransr/bountyplz/network)
+[![GitHub stars](https://img.shields.io/github/stars/fransr/bountyplz.svg)](https://github.com/fransr/bountyplz/stargazers)
+[![GitHub license](https://img.shields.io/github/license/fransr/bountyplz.svg)](https://github.com/fransr/bountyplz)
+
 ### description
 
 This is a project created by [Frans Rosén](https://twitter.com/fransrosen). The idea is to be able to submit a report without any interaction. It's taking advantage of all features the existing site has, such as attachments, inline images, assets, weaknesses and severity.
