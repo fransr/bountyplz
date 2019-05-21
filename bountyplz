@@ -41,6 +41,9 @@ report_args () {
 		--draft|-d)
 			_draft="1"
 		;;
+		--scope)
+			_scope="1"
+		;;
 		--force|-f)
 			_force="1"
 		;;
@@ -63,7 +66,7 @@ report_args () {
 		shift
 	done
 	[ "${_program}" != "" ] || doc_error "program not found"
-	[ "${_report_file}" != "" ] || doc_error "report file not found"
+	if [ "${_report_file}" != "" ] && [ "${_scope}" = "" ]; then doc_error "report file not found"; fi
 }
 
 trim () {
@@ -262,10 +265,26 @@ help)
 	doc 'h1 -p <markdown-file>' 'to only preview the parsing of the file for hackerone'
 	doc 'bc -p <markdown-file>' 'to only preview the parsing of the file for bugcrowd'
 	echo ''
+	doc 'h1 <program> --scope' 'fetches assets in scope (h1 only)'
 	echo ''
 ;;
 h1)
 	h1_init "$@"
+	if [ "${_scope}" == "1" ]; then
+		#echo "Domains in scope:"
+		h1_api "current_user"
+		_signed_in=$(echo "${_user_info}" | jq $'.["signed_in?"]')
+		_csrf_token=$(echo "${_user_info}" | jq -r $'.["csrf_token"]')
+		if [ "${_signed_in}" == "false" ]; then
+			h1_api "sign-in"
+		else
+			doc_success "already signed in!"
+		fi
+		_csrf_token=$(echo "${_user_info}" | jq -r $'.["csrf_token"]')
+		h1_api "scope"
+		exit 0
+	fi
+
 	h1_parse "${_report_file}"
 	h1_preview
 	if [ "${_preview}" != "1" ]; then
